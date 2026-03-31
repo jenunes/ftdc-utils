@@ -17,8 +17,7 @@ var cmpMetrics = map[string]bool{
 	"serverStatus.start":                             true,
 	"serverStatus.end":                               true,
 	"serverStatus.asserts":                           true,
-	"serverStatus.mem.mapped":                        true,
-	"serverStatus.mem.mappedWithJournal":             true,
+	"serverStatus.connections":                       true,
 	"serverStatus.mem.resident":                      true,
 	"serverStatus.mem.supported":                     true,
 	"serverStatus.mem.virtual":                       true,
@@ -27,12 +26,15 @@ var cmpMetrics = map[string]bool{
 	"serverStatus.metrics.document":                  true,
 	"serverStatus.metrics.operation":                 true,
 	"serverStatus.metrics.queryExecutor":             true,
-	"serverStatus.metrics.record":                    true,
 	"serverStatus.metrics.repl":                      true,
 	"serverStatus.metrics.storage":                   true,
 	"serverStatus.metrics.ttl":                       true,
 	"serverStatus.opcounters":                        true,
 	"serverStatus.opcountersRepl":                    true,
+	"serverStatus.opLatencies":                       true,
+	"serverStatus.tcmalloc":                          true,
+	"serverStatus.transactions":                      true,
+	"serverStatus.flowControl":                       true,
 	"serverStatus.wiredTiger.LSM":                    true,
 	"serverStatus.wiredTiger.async":                  true,
 	"serverStatus.wiredTiger.block-manager":          true,
@@ -41,7 +43,7 @@ var cmpMetrics = map[string]bool{
 	"serverStatus.wiredTiger.data-handle":            true,
 	"serverStatus.wiredTiger.reconciliation":         true,
 	"serverStatus.wiredTiger.session":                true,
-	"serverStatus.writeBacksQueued":                  true,
+	"systemMetrics":                                  true,
 }
 
 const badTimePenalty = -0.1
@@ -98,8 +100,8 @@ func Proximal(a, b Stats) (score float64, scores CmpScores, ok bool) {
 		Metric: "NSamples",
 		Score:  1,
 	}
-	if diff/max > CmpThreshold {
-		nsampleScore.Score = 1 + 2*badTimePenalty // doubled for expected impact
+	if max > 0 && diff/max > CmpThreshold {
+		nsampleScore.Score = 1 + 2*badTimePenalty
 		nsampleScore.Err = fmt.Errorf("sample count not proximal: (%d, %d) "+
 			"are not within threshold (%d%%)\n",
 			a.NSamples, b.NSamples, int(CmpThreshold*100))
@@ -107,7 +109,6 @@ func Proximal(a, b Stats) (score float64, scores CmpScores, ok bool) {
 
 	scores = make(CmpScores, 0)
 	scores = append(scores, nsampleScore)
-	var sumScores float64
 	for key := range a.Metrics {
 		if _, ok := b.Metrics[key]; !ok {
 			continue
@@ -117,16 +118,12 @@ func Proximal(a, b Stats) (score float64, scores CmpScores, ok bool) {
 		}
 		cmp := compareMetrics(a, b, key)
 		scores = append(scores, cmp)
-		sumScores += cmp.Score
 	}
 	sort.Sort(scores)
 
-	// weighted sum of 1/2, 1/4, 1/8, ...
-	// with scores from worst to best
 	for i, c := range scores {
 		score += math.Pow(2, -float64(i+1)) * c.Score
 	}
-	// score is quadratic, so sqrt for linear
 	score = math.Sqrt(score)
 
 	ok = score >= (1 - CmpThreshold)
@@ -134,9 +131,7 @@ func Proximal(a, b Stats) (score float64, scores CmpScores, ok bool) {
 }
 
 // compareMetrics computes a measure of deviation between two samples of the
-// same metric. It computes a score of (1 - rx')*(1 - rx''), where rx' and
-// rx'' correspond to the relative difference of the first and second
-// derivatives of the time-series metric.
+// same metric.
 func compareMetrics(sa, sb Stats, key string) (score CmpScore) {
 	score.Metric = key
 	a := sa.Metrics[key]

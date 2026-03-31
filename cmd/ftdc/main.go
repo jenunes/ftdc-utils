@@ -10,7 +10,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/jenunes/ftdc-utils"
+	ftdc "github.com/jenunes/ftdc-utils"
 	"github.com/jessevdk/go-flags"
 )
 
@@ -48,8 +48,7 @@ func (decOpts *DecodeCommand) Execute(args []string) error {
 	if err != nil {
 		return err
 	}
-	err = writeJSONtoFile(output, decOpts.Out)
-	return err
+	return writeJSONtoFile(output, decOpts.Out)
 }
 
 type ExportCommand struct {
@@ -87,11 +86,9 @@ func (expOpts *ExportCommand) Execute(args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to open include keys file '%s': %s", expOpts.IncludeKeys, err)
 		}
-
 	}
 
-	err := export(expOpts.Args.Files, expOpts.StartTime, expOpts.EndTime, expOpts.Silent, out, includeKeys)
-	return err
+	return export(expOpts.Args.Files, expOpts.StartTime, expOpts.EndTime, expOpts.Silent, out, includeKeys)
 }
 
 type StatsCommand struct {
@@ -111,8 +108,7 @@ func (statOpts *StatsCommand) Execute(args []string) error {
 	if err != nil {
 		return err
 	}
-	err = writeJSONtoFile(output, statOpts.Out)
-	return err
+	return writeJSONtoFile(output, statOpts.Out)
 }
 
 type CompareCommand struct {
@@ -139,7 +135,6 @@ func (cmp *CompareCommand) Execute(args []string) error {
 	}
 
 	score, scores, ok := ftdc.Proximal(sa, sb)
-	// score to stdout, scores to stdout, ok to status code
 	sort.Sort(sort.Reverse(scores))
 	var msg string
 	for _, s := range scores {
@@ -172,8 +167,8 @@ func readJSONStats(file string) (s ftdc.Stats, err error) {
 	if err != nil {
 		return
 	}
+	defer f.Close()
 	err = json.NewDecoder(f).Decode(&s)
-	f.Close()
 	return
 }
 
@@ -218,6 +213,7 @@ func stats(files []string, tStart, tEnd string) (interface{}, error) {
 
 		cs, err := ftdc.ComputeStatsInterval(f, start, end)
 		if err != nil {
+			f.Close()
 			return nil, err
 		}
 		ss = append(ss, cs...)
@@ -243,7 +239,6 @@ func decode(files []string, tStart, tEnd string, silent, shouldMerge bool) (inte
 		return nil, err
 	}
 
-	// this will consume a LOT of memory
 	cs := []ftdc.Chunk{}
 	count := 0
 	for _, file := range files {
@@ -261,7 +256,7 @@ func decode(files []string, tStart, tEnd string, silent, shouldMerge bool) (inte
 		}()
 
 		logChunk := func(c ftdc.Chunk) {
-			t := time.Unix(int64(c.Map()["start"].Value)/1000, 0).Format(time.UnixDate)
+			t := time.Unix(c.Map()["start"].Value/1000, 0).Format(time.UnixDate)
 			fmt.Fprintf(os.Stderr, "chunk in file '%s' with %d metrics and "+
 				"%d deltas on %s\n", file, len(c.Metrics), c.NDeltas, t)
 		}
@@ -293,8 +288,7 @@ func decode(files []string, tStart, tEnd string, silent, shouldMerge bool) (inte
 			for _, m := range c.Metrics {
 				k := m.Key
 				if _, ok := total[k]; ok {
-					// !! this expects contigious chunks
-					newDeltas := make([]int, 0, len(total[k].Deltas)+len(m.Deltas))
+					newDeltas := make([]int64, 0, len(total[k].Deltas)+len(m.Deltas))
 					newDeltas = append(newDeltas, total[k].Deltas...)
 					newDeltas = append(newDeltas, m.Deltas...)
 					total[k] = ftdc.Metric{
@@ -311,7 +305,6 @@ func decode(files []string, tStart, tEnd string, silent, shouldMerge bool) (inte
 	}
 
 	return cs, nil
-
 }
 
 func export(files []string, tStart string, tEnd string, silent bool, out io.Writer, includeKeys map[string]bool) error {
@@ -343,7 +336,7 @@ func export(files []string, tStart string, tEnd string, silent bool, out io.Writ
 		}()
 
 		logChunk := func(c ftdc.Chunk) {
-			t := time.Unix(int64(c.Map()["start"].Value)/1000, 0).Format(time.UnixDate)
+			t := time.Unix(c.Map()["start"].Value/1000, 0).Format(time.UnixDate)
 			fmt.Fprintf(os.Stderr, "chunk in file '%s' with %d metrics and "+
 				"%d deltas on %s\n", file, len(c.Metrics), c.NDeltas, t)
 		}
@@ -353,7 +346,7 @@ func export(files []string, tStart string, tEnd string, silent bool, out io.Writ
 				continue
 			}
 
-			chunkCount += 1
+			chunkCount++
 
 			if !silent {
 				logChunk(c)
@@ -364,7 +357,7 @@ func export(files []string, tStart string, tEnd string, silent bool, out io.Writ
 				if err != nil {
 					return fmt.Errorf("failed to write output (chunk: %d, delta: %d): %s", chunkCount, i, err)
 				}
-				count += 1
+				count++
 			}
 		}
 		f.Close()
@@ -375,7 +368,6 @@ func export(files []string, tStart string, tEnd string, silent bool, out io.Writ
 	}
 
 	return nil
-
 }
 
 func readIncludeKeysFile(file string) (map[string]bool, error) {

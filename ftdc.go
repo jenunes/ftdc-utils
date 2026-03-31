@@ -5,10 +5,24 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.in/mgo.v2/bson"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
-// Chunk represents a 'metric chunk' of data in the FTDC
+// DocType identifies the type of document in an FTDC file.
+type DocType int32
+
+const (
+	// DocMetadata is a metadata document (type 0), collected on startup/rotation.
+	DocMetadata DocType = 0
+
+	// DocMetricChunk is a compressed metric chunk (type 1), the primary data type.
+	DocMetricChunk DocType = 1
+
+	// DocPeriodicMetadata is a periodic metadata document (type 2), new in MongoDB ~7.x.
+	DocPeriodicMetadata DocType = 2
+)
+
+// Chunk represents a 'metric chunk' of data in the FTDC (type 1).
 type Chunk struct {
 	Metrics []Metric
 	NDeltas int
@@ -16,7 +30,7 @@ type Chunk struct {
 
 // Map converts the chunk to a map representation.
 func (c *Chunk) Map() map[string]Metric {
-	m := make(map[string]Metric)
+	m := make(map[string]Metric, len(c.Metrics))
 	for _, metric := range c.Metrics {
 		m[metric.Key] = metric
 	}
@@ -30,21 +44,22 @@ func (c *Chunk) Clip(start, end time.Time) bool {
 	st := start.Unix()
 	et := end.Unix()
 	var si, ei int
-	for _, m := range c.Metrics {
+	for idx := range c.Metrics {
+		m := &c.Metrics[idx]
 		if m.Key != "start" {
 			continue
 		}
-		mst := int64(m.Value) / 1000
-		met := (int64(m.Value) + int64(sum(m.Deltas...))) / 1000
+		mst := m.Value / 1000
+		met := (m.Value + sum(m.Deltas...)) / 1000
 		if met < st || mst > et {
-			return false // entire chunk outside range
+			return false
 		}
 		if mst > st && met < et {
-			return true // entire chunk inside range
+			return true
 		}
 		t := mst
 		for i := 0; i < c.NDeltas; i++ {
-			t += int64(m.Deltas[i]) / 1000
+			t += m.Deltas[i] / 1000
 			if t < st {
 				si++
 			}
@@ -55,16 +70,16 @@ func (c *Chunk) Clip(start, end time.Time) bool {
 			}
 		}
 		if ei+1 < c.NDeltas {
-			ei++ // inclusive of end time
+			ei++
 		} else {
 			ei = c.NDeltas - 1
 		}
 		break
 	}
 	c.NDeltas = ei - si
-	for _, m := range c.Metrics {
-		m.Value += sum(m.Deltas[:si]...)
-		m.Deltas = m.Deltas[si : ei+1]
+	for idx := range c.Metrics {
+		c.Metrics[idx].Value += sum(c.Metrics[idx].Deltas[:si]...)
+		c.Metrics[idx].Deltas = c.Metrics[idx].Deltas[si : ei+1]
 	}
 	return true
 }
@@ -74,14 +89,12 @@ func (c *Chunk) Clip(start, end time.Time) bool {
 // included in the output. If a value of includeKeys is false, it won't be
 // shown even if the value for a parent document is set to true. If includeKeys
 // is nil, data for every key is returned.
-func (c *Chunk) Expand(includeKeys map[string]bool) []map[string]int {
-	// Initialize data structures
-	deltas := make([]map[string]int, 0, c.NDeltas+1)
-	last := make(map[string]int)
+func (c *Chunk) Expand(includeKeys map[string]bool) []map[string]int64 {
+	deltas := make([]map[string]int64, 0, c.NDeltas+1)
+	last := make(map[string]int64, len(c.Metrics))
 
-	// Expand deltas
 	for i := -1; i < c.NDeltas; i++ {
-		d := make(map[string]int)
+		d := make(map[string]int64, len(c.Metrics))
 		for _, m := range c.Metrics {
 			v, ok := last[m.Key]
 			if !ok {
@@ -98,7 +111,7 @@ func (c *Chunk) Expand(includeKeys map[string]bool) []map[string]int {
 				if !ok {
 					include = false
 					for prefix, inc := range includeKeys {
-						if inc && strings.HasPrefix(m.Key, prefix + ".") {
+						if inc && strings.HasPrefix(m.Key, prefix+".") {
 							include = true
 							break
 						}
@@ -119,8 +132,9 @@ func (c *Chunk) Expand(includeKeys map[string]bool) []map[string]int {
 }
 
 // Chunks takes an FTDC diagnostic file in the form of an io.Reader, and
-// yields chunks on the given channel. The channel is closed when there are
-// no more chunks.
+// yields metric chunks (type 1) on the given channel. Type 0 and type 2
+// documents are silently skipped for backward compatibility.
+// The channel is closed when there are no more chunks.
 func Chunks(r io.Reader, c chan<- Chunk) error {
 	errCh := make(chan error)
 	ch := make(chan bson.D)
@@ -143,14 +157,13 @@ func Chunks(r io.Reader, c chan<- Chunk) error {
 
 // Metric represents an item in a chunk.
 type Metric struct {
-	// Key is the dot-delimited key of the metric. The key is either
-	// 'start', 'end', or starts with 'serverStatus.'.
+	// Key is the dot-delimited key of the metric.
 	Key string
 
-	// Value is the value of the metric at the beginning of the sample
-	Value int
+	// Value is the value of the metric at the beginning of the sample.
+	Value int64
 
 	// Deltas is the slice of deltas, which accumulate on Value to yield the
 	// specific sample's value.
-	Deltas []int
+	Deltas []int64
 }
